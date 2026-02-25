@@ -4,7 +4,6 @@ import uuid
 import qrcode
 import aiohttp
 import re
-import aiohttp
 import hashlib
 import json
 import base64
@@ -1425,7 +1424,6 @@ def get_user_router() -> Router:
                 discount_amount = (base_price * discount_percentage / 100).quantize(Decimal("0.01"))
                 price_rub = base_price - discount_amount
 
-        plan_id = data.get('plan_id')
         customer_email = data.get('customer_email')
         host_name = data.get('host_name')
         action = data.get('action')
@@ -1433,12 +1431,6 @@ def get_user_router() -> Router:
         
         if not customer_email:
             customer_email = get_setting("receipt_email")
-
-        plan = get_plan_by_id(plan_id)
-        if not plan:
-            await callback.message.answer("Произошла ошибка при выборе тарифа.")
-            await state.clear()
-            return
 
         months = plan['months']
         user_id = callback.from_user.id
@@ -1500,13 +1492,6 @@ def get_user_router() -> Router:
         action = data.get('action')
         key_id = data.get('key_id')
 
-        cryptobot_token = get_setting('cryptobot_token')
-        if not cryptobot_token:
-            logger.error(f"Attempt to create Crypto Pay invoice failed for user {user_id}: cryptobot_token is not set.")
-            await callback.message.edit_text("❌ Оплата криптовалютой временно недоступна. (Администратор не указал токен).")
-            await state.clear()
-            return
-
         plan = get_plan_by_id(plan_id)
         if not plan:
             logger.error(f"Attempt to create Crypto Pay invoice failed for user {user_id}: Plan with id {plan_id} not found.")
@@ -1514,14 +1499,6 @@ def get_user_router() -> Router:
             await state.clear()
             return
         
-        plan_id = data.get('plan_id')
-        plan = get_plan_by_id(plan_id)
-
-        if not plan:
-            await callback.message.answer("Произошла ошибка при выборе тарифа.")
-            await state.clear()
-            return
-
         base_price = Decimal(str(plan['price']))
         price_rub_decimal = base_price
 
