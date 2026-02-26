@@ -8,6 +8,7 @@ import hashlib
 import json
 import base64
 import asyncio
+import math
 
 from urllib.parse import urlencode
 from hmac import compare_digest
@@ -1638,6 +1639,70 @@ def get_user_router() -> Router:
 
     return user_router
 
+async def _create_heleket_payment_request(
+    user_id: int,
+    price: float,
+    months: int,
+    host_name: str,
+    state_data: Dict,
+) -> str | None:
+    """
+    Универсальный помощник для создания счёта в Crypto Pay (CryptoBot).
+    Используется для:
+      - пополнения баланса (action='top_up')
+      - покупки/продления (action='new'/'extend')
+    Возвращает URL для оплаты или None при ошибке.
+    """
+    try:
+        if not CRYPTO_BOT_TOKEN:
+            logger.error("CRYPTO_BOT_TOKEN is not set in settings.")
+            return None
+
+        # Создаём клиента CryptoPay
+        crypto_pay = CryptoPay(token=CRYPTO_BOT_TOKEN, testnet=TESTNET if get_setting("cryptobot_testnet") == "true" else False)
+
+        # В CryptoPay валюта USDT/TON и т.п. Тут используем USDT (по умолчанию).
+        currency = get_setting("cryptobot_currency") or "USDT"
+
+        # Если хочешь динамический курс RUB→USDT, сюда можно подставить пересчитанное значение.
+        # Сейчас считаем, что price уже указана в USDT/TON и т.п.
+        amount = float(price)
+
+        # Сохраняем данные, которые понадобятся в вебхуке/обработчике
+        metadata = {
+            "user_id": user_id,
+            "price": float(price),
+            "months": months,
+            "host_name": host_name,
+            "action": state_data.get("action"),
+            "key_id": state_data.get("key_id"),
+            "plan_id": state_data.get("plan_id"),
+            "customer_email": state_data.get("customer_email"),
+            "payment_method": "CryptoBot",
+        }
+
+        # В CryptoPay есть поле payload, туда кладём JSON с метаданными
+        payload_str = json.dumps(metadata, ensure_ascii=False)
+
+        invoice = await crypto_pay.create_invoice(
+            asset=currency,
+            amount=amount,
+            description="Оплата VPN-подписки",
+            payload=payload_str,
+        )
+
+        pay_url = getattr(invoice, "pay_url", None) or getattr(invoice, "bot_invoice_url", None)
+
+        if not pay_url:
+            logger.error(f"CryptoPay invoice created but pay_url is missing. Invoice: {invoice}")
+            return None
+
+        return pay_url
+
+    except Exception as e:
+        logger.error(f"Failed to create CryptoPay/Heleket-like invoice: {e}", exc_info=True)
+        return None
+
 async def notify_admin_of_purchase(bot: Bot, metadata: dict):
     try:
         admin_id_raw = get_setting("admin_telegram_id")
@@ -1956,3 +2021,67 @@ async def process_successful_payment(bot: Bot, metadata: dict):
                 await bot.send_message(chat_id=user_id, text="❌ Ошибка при выдаче ключа.")
             except Exception:
                 pass
+
+# Храним TonConnect-инстансы на время сессии пользователя (простая in-memory мапа)
+_TON_CONNECT_INSTANCES: Dict[int, TonConnect] = {}
+
+
+async def _start_ton_connect_process(user_id: int, transaction_payload: dict) -> str:
+    """
+    Запускает TonConnect, готовит link для кошелька.
+    На вход подаётся payload вида:
+      {
+        'messages': [{'address': wallet, 'amount': '...', 'payload': '...'}],
+        'valid_until': timestamp
+      }
+    Возвращает URL, который можно открыть/закодировать в QR.
+    """
+    # В простейшем варианте используем временный TonConnect без постоянного store
+    connector = TonConnect(manifest_url=get_setting("ton_manifest_url") or "")
+    _TON_CONNECT_INSTANCES[user_id] = connector
+
+    # Подготавливаем запрос на транзакцию
+    # Для большинства кошельков достаточно передать запрос в query-параметрах
+    # Формат описан в https://github.com/ton-connect
+    payload_b64 = base64.b64encode(json.dumps(transaction_payload).encode("utf-8")).decode("utf-8")
+
+    # Стандартная схема tonconnect://
+    universal_link = f"tonconnect://tonconnect?payload={payload_b64}"
+
+    return universal_link
+async def get_usdt_rub_rate() -> Decimal | None:
+    """
+    Возвращает курс USDT→RUB как Decimal или None при ошибке.
+    """
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=USDTRUB"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as resp:
+                if resp.status != 200:
+                    logger.error(f"USDT/RUB rate request failed with status {resp.status}")
+                    return None
+                data = await resp.json()
+                price = Decimal(str(data.get("price")))
+                return price
+    except Exception as e:
+        logger.error(f"Failed to get USDT/RUB rate: {e}", exc_info=True)
+        return None
+
+
+async def get_ton_usdt_rate() -> Decimal | None:
+    """
+    Возвращает курс TON→USDT как Decimal или None при ошибке.
+    """
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=TONUSDT"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as resp:
+                if resp.status != 200:
+                    logger.error(f"TON/USDT rate request failed with status {resp.status}")
+                    return None
+                data = await resp.json()
+                price = Decimal(str(data.get("price")))
+                return price
+    except Exception as e:
+        logger.error(f"Failed to get TON/USDT rate: {e}", exc_info=True)
+        return None
